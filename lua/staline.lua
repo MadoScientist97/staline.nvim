@@ -6,7 +6,7 @@ local colorize = util.colorize
 local t = conf.defaults
 local redirect = vim.fn.has('win32') == 1 and "nul" or "/dev/null"
 
-local set_stl = function()
+local set_statusline = function()
     for _, win in pairs(vim.api.nvim_list_wins()) do
         if vim.api.nvim_get_current_win() == win then
             vim.wo[win].statusline = '%!v:lua.require\'staline\'.get_statusline("active")'
@@ -20,10 +20,8 @@ end
 local update_branch = function()
     local cmd = io.popen('git branch --show-current 2>' .. redirect)
     local branch = ''
-    if cmd ~= nil then
-        branch = cmd:read("*l") or cmd:read("*a")
-        cmd:close()
-    end
+    branch = cmd:read("*l") or cmd:read("*a")
+    cmd:close()
 
     M.Branch_name = branch ~= "" and t.branch_symbol .. branch or ""
 end
@@ -33,10 +31,9 @@ M.setup = function(opts)
     for k,_ in pairs(opts or {}) do for k1,v1 in pairs(opts[k]) do conf[k][k1] = v1 end end
 
     vim.api.nvim_create_autocmd('BufEnter', {callback=update_branch})
-    vim.api.nvim_create_autocmd(
-        {'BufEnter', 'BufReadPost', 'ColorScheme', 'TabEnter', 'TabClosed'},
-        { callback=set_stl }
-    )
+    vim.api.nvim_create_autocmd({'BufEnter', 'BufReadPost', 'ColorScheme'}, {
+        pattern="*", callback=set_statusline
+    })
 end
 
 local call_highlights = function(fg, bg)
@@ -52,7 +49,7 @@ local get_lsp = function()
 
     for type, sign in pairs(conf.lsp_symbols) do
         local count = #vim.diagnostic.get(0, { severity=type })
-        local hl = t.true_colors and "%#DiagnosticSign"..type.."#" or " "
+        local hl = t.true_colors and "%#Diagnostic"..type.."#" or " "
         local number = count > 0 and hl..sign..count.." " or ""
         lsp_details = lsp_details..number
     end
@@ -75,7 +72,7 @@ end
 
 local lsp_client_name = function()
     local clients = {}
-    for _, client in pairs(vim.lsp.get_active_clients()) do
+    for _, client in pairs(vim.lsp.buf_get_clients(0)) do
         if t.expand_null_ls then
             if client.name == 'null-ls' then
                 for _, source in pairs(get_attached_null_ls_sources()) do
@@ -123,6 +120,104 @@ local parse_section = function(section)
     end
 end
 
+-- TODO Remove this Later
+local function tprint (tbl, indent)
+  if not indent then indent = 0 end
+  for k, v in pairs(tbl) do
+    local formatting = string.rep("  ", indent) .. k .. ": "
+    if type(v) == "table" then
+      print(formatting)
+      tprint(v, indent+1)
+    elseif type(v) == 'boolean' then
+      print(formatting .. tostring(v))
+    else
+      print(formatting .. v)
+    end
+  end
+end
+
+local function buildPathFromTab(wordTab)
+  local final_str = ''
+  if #wordTab == 1 then
+    return wordTab[1]
+  end
+  for i = 1, #wordTab - 1, 1 do
+    final_str = final_str .. wordTab[i] .. "/"
+  end
+  final_str = final_str .. wordTab[#wordTab]
+  return final_str
+end
+
+local function updateHomePrefix (wordTab)
+  if wordTab[1] == "Users" and wordTab[2] == os.getenv("USER") then
+    table.remove(wordTab,1)
+    table.remove(wordTab,1)
+    table.insert(wordTab,1,"~")
+    return {true, wordTab}
+  end
+  return {false, wordTab}
+end
+
+local function resizePath(wordTab, origLen, removedLetters, maxLen)
+  local prev_string = ""
+  local origTab = wordTab
+  local origRemovedLetters = removedLetters
+  while ((origLen - removedLetters) > maxLen)
+  do
+    local outer_count = 0
+    prev_string = buildPathFromTab(wordTab)
+    for i = 1, #wordTab - 1, 1 do
+      local offset = math.ceil(2 + #wordTab[i]*(i/(#wordTab+outer_count)))
+      if #wordTab[i] > 1 then
+        removedLetters = removedLetters + #wordTab[i] - offset + 1
+        wordTab[i] = string.sub(wordTab[i], 1, math.min(#wordTab,offset))
+      end
+    end
+    outer_count = outer_count + 1
+--    if prev_string == buildPathFromTab(wordTab) then
+--      wordTab = deletePrefix(origTab, origLen, origRemovedLetters, maxLen)
+--      origTab = wordTab
+--    else
+--      prev_string = buildPathFromTab(wordTab)
+--    end
+  end
+  return wordTab
+end
+
+local function concat_crumbs(path_string, maxLen)
+  local wordTab = {}
+  for word in string.gmatch(path_string, '([^/]+)') do
+    wordTab[#wordTab + 1] = word
+  end
+  local origLen = #path_string
+  local removedLetters = 0
+  local final_str = ''
+  local countIfPrefixRemoved = removedLetters + #wordTab[1] + 1 + #wordTab[2] + 1;
+  local prefix_result = updateHomePrefix(wordTab)
+  if prefix_result[1] == true then
+    removedLetters = removedLetters + countIfPrefixRemoved
+  end
+  wordTab = prefix_result[2]
+  if (origLen - removedLetters <= maxLen) then
+    final_str = buildPathFromTab(wordTab)
+  end
+  wordTab = resizePath(wordTab, origLen, removedLetters, maxLen)
+  final_str = buildPathFromTab(wordTab)
+  return final_str
+end
+
+local format_file_path = function ()
+  local fname = vim.fn.expand('%:p')
+  local width = vim.api.nvim_win_get_width(0)
+  local pathlen = #fname
+  local reservedColNums = 55
+  if pathlen < width - reservedColNums then
+    return fname
+  else
+    return concat_crumbs(fname, width - reservedColNums)
+  end
+end
+
 M.get_statusline = function(status)
     if conf.special_table[vim.bo.ft] ~= nil then
         local special = conf.special_table[vim.bo.ft]
@@ -136,7 +231,7 @@ M.get_statusline = function(status)
     local bgColor = status and t.bg or t.inactive_bgcolor
     local modeIcon = conf.mode_icons[mode] or " "
 
-    local f_name = t.full_path and '%F' or '%t'
+    local f_name = t.full_path and format_file_path() or '%t'
     -- TODO: original color of icon
     local f_icon = util.get_file_icon(vim.fn.expand('%:t'), vim.fn.expand('%:e'))
     local edited = vim.bo.mod and t.mod_symbol or ""
@@ -145,7 +240,7 @@ M.get_statusline = function(status)
 
     call_highlights(fgColor, bgColor)
 
-    M.sections['mode']             = " "..modeIcon.." "
+    M.sections['mode']             = (" "..modeIcon.." ")
     M.sections['branch']           = " "..(M.Branch_name or "").." "
     M.sections['file_name']        = " "..f_icon.." "..f_name..edited.." "
     M.sections['file_size']        = " " ..size.. "k "
